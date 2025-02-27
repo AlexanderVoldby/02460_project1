@@ -11,7 +11,7 @@ class TwoGaussians:
         A simple class to define an uneven mixture of two Gaussians.
         """
 
-        mixture = td.Categorical(torch.tensor([1/5, 4/5]))
+        mixture = td.Categorical(torch.tensor([1/5, 3/5]))
         components = td.Independent(
             td.Normal(
                 torch.tensor(
