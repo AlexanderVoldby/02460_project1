@@ -303,7 +303,7 @@ if __name__ == "__main__":
             probabilities = torch.full((D,), 0.5)  # N is the desired length of the tensor
             mask = torch.bernoulli(probabilities).to(torch.int)
         else:
-            # Alternate mask each layer when using checkerboard mask
+            # Alternate mask each layer when using checkerboard or split mask
             mask = 1 - mask
         scale_net = nn.Sequential(nn.Linear(D, num_hidden), nn.ReLU(), nn.Linear(num_hidden, D))
         translation_net = nn.Sequential(nn.Linear(D, num_hidden), nn.ReLU(), nn.Linear(num_hidden, D))
