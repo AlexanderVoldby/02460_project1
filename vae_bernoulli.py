@@ -273,12 +273,13 @@ def test(model, data_loader, device):
 
 def plot_approx_posterior(model, data_loader, device, M, data_points, figure_name):
     data_iter = iter(data_loader)
-    label_list = []
+    #label_list = [] not need to just make black dots
     z_list = []
     with torch.no_grad():
-        for x, label in data_iter:
+        for x, _ in data_iter:
+        #for x, label in data_iter:
             x = x.to(device)
-            label_list.append(label)
+            #label_list.append(label)
             q = model.encoder(x)
             z = None
             if isinstance(model.prior, GaussianPrior):
@@ -287,7 +288,7 @@ def plot_approx_posterior(model, data_loader, device, M, data_points, figure_nam
                 z = reparameterizeMoG(q[0], torch.sqrt(torch.exp(q[1])), q[2]) 
             z_list.append(z)
         z = torch.cat(z_list, dim=0).numpy()
-        labels = torch.cat(label_list, dim=0).numpy()
+        #labels = torch.cat(label_list, dim=0).numpy()
         if (M > 2):
             pca = PCA(n_components=2)
             z = pca.fit_transform(z)
@@ -295,7 +296,7 @@ def plot_approx_posterior(model, data_loader, device, M, data_points, figure_nam
             z = np.concatenate(z, np.zeros(z.shape[0], 1))
         if len(z) > data_points:
             z = z[0:data_points,:]
-            labels = labels[0:data_points]
+            #labels = labels[0:data_points]
         plt.figure(figsize=(8, 6))
         # Plot prior
         n_points = 1000
@@ -303,17 +304,22 @@ def plot_approx_posterior(model, data_loader, device, M, data_points, figure_nam
         y = np.linspace(min(z[:,1]), max(z[:,1]), n_points)
         X, Y = np.meshgrid(x, y)
         grid_points = np.column_stack((X.ravel(), Y.ravel()))
-        Z = np.exp(model.prior().log_prob(pca.inverse_transform(torch.from_numpy(grid_points)).to(device)).numpy())
+        if (M > 2):
+            Z = np.exp(model.prior().log_prob(pca.inverse_transform(torch.from_numpy(grid_points)).to(device)).numpy())
+        else:
+            Z = np.exp(model.prior().log_prob(torch.from_numpy(grid_points).to(device)).numpy())
         Z = Z.reshape(n_points, n_points)
         if isinstance(model.prior, GaussianPrior):
             plt.title("Test Set in Latent Space and contour Gaussian prior")
         elif isinstance(model.prior, MoGPrior):
             plt.title("Test Set in Latent Space and contour MoG prior")
-        plt.contour(X, Y, Z, levels=15, colors='black', alpha=0.7)
-        scatter = plt.scatter(z[:, 0], z[:, 1], c=labels, cmap='jet', s=8, alpha=0.7)
-        cbar = plt.colorbar(scatter, label="Classes", orientation="vertical")
-        cbar.set_ticks(np.unique(labels))  # Set color bar ticks to class labels
-        cbar.set_label("Class Label") 
+        #plt.contour(X, Y, Z, levels=15, colors='black', alpha=0.7)
+        plt.contourf(X, Y, Z, levels=15, cmap='viridis', alpha=0.7)
+        #scatter = plt.scatter(z[:, 0], z[:, 1], c=labels, cmap='jet', s=8, alpha=0.7)
+        plt.scatter(z[:, 0], z[:, 1], color='black', s=5, alpha=0.8)
+        #cbar = plt.colorbar(scatter, label="Classes", orientation="vertical")
+        #cbar.set_ticks(np.unique(labels))  # Set color bar ticks to class labels
+        #cbar.set_label("Class Label") 
         plt.xlabel("Latent Dimension 1")
         plt.ylabel("Latent Dimension 2")
         plt.savefig('pictures/contour_' + figure_name + '.png')
@@ -425,5 +431,6 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.model, map_location=torch.device(args.device)))
 
         # Plot test set in latent space
-        plot_approx_posterior(model, mnist_test_loader, args.device, M, len(mnist_test_loader)*mnist_test_loader.batch_size, args.prior) # The second last parameter is the number of data points to plot in the latent space
+        #plot_approx_posterior(model, mnist_test_loader, args.device, M, len(mnist_test_loader)*mnist_test_loader.batch_size, args.prior) # The second last parameter is the number of data points to plot in the latent space
+        plot_approx_posterior(model, mnist_test_loader, args.device, M, 2500, args.prior) # 5000 points
 
