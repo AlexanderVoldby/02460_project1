@@ -69,8 +69,9 @@ class MaskedCouplingLayer(nn.Module):
         """
         # Exercise 2.4
         # Applying the mask to the input
-        z_p = self.mask * z + (1 - self.mask) * (z * torch.exp(self.scale_net(self.mask * z)) + self.translation_net(self.mask * z))
-        log_det_J = torch.sum((1 - self.mask) * self.scale_net(self.mask * z), dim=1) 
+        z_masked = self.mask * z
+        z_p = self.mask * z + (1 - self.mask) * (z * torch.exp(self.scale_net(z_masked)) + self.translation_net(z_masked))
+        log_det_J = torch.sum((1 - self.mask) * self.scale_net(z_masked), dim=1) 
         return z_p, log_det_J
     
     def inverse(self, z_p):
@@ -86,7 +87,8 @@ class MaskedCouplingLayer(nn.Module):
         sum_log_det_J: [torch.Tensor]
             The sum of the log determinants of the Jacobian matrices of the inverse transformations.
         """
-        z = self.mask * z_p + (1 - self.mask) * ((z_p - self.translation_net(self.mask * z_p)) * torch.exp(-self.scale_net(self.mask * z_p)))
+        masked_scale_output = -self.scale_net(self.mask * z_p)
+        z = self.mask * z_p + (1 - self.mask) * ((z_p - self.translation_net(self.mask * z_p)) * torch.exp(masked_scale_output))
         log_det_J = -torch.sum((1 - self.mask) * self.scale_net(self.mask * z_p), dim=1) 
         return z, log_det_J
 
@@ -119,6 +121,8 @@ class Flow(nn.Module):
         sum_log_det_J: [torch.Tensor]
             The sum of the log determinants of the Jacobian matrices of the forward transformations.            
         """
+        print(f"shape of z: {z.shape}")
+        print(f"z type: {z.dtype}")
         sum_log_det_J = 0
         for T in self.transformations:
             x, log_det_J = T(z)
@@ -296,16 +300,22 @@ if __name__ == "__main__":
         mask = torch.zeros((D,))
         mask[D//2:] = 1
     
-    num_transformations = 5
-    num_hidden = 8
+    num_transformations = 10
+    num_hidden = 16
     
     for i in range(num_transformations):
         if args.mask == 'rand':
-            mask = torch.randint(0, 2, (D,))
+            mask = torch.randint(0, 2, (D,), dtype=torch.float32)
         else:
             mask = (1-mask) # Flip the mask
-        scale_net = nn.Sequential(nn.Linear(D, num_hidden), nn.ReLU(), nn.Linear(num_hidden, D))
-        translation_net = nn.Sequential(nn.Linear(D, num_hidden), nn.ReLU(), nn.Linear(num_hidden, D))
+        scale_net = nn.Sequential(nn.Linear(D, num_hidden), nn.ReLU(),
+                                  nn.Linear(num_hidden, 2*num_hidden), nn.ReLU(),
+                                  nn.Linear(2*num_hidden, num_hidden), nn.ReLU(),
+                                  nn.Linear(num_hidden, D), nn.Tanh())
+        translation_net = nn.Sequential(nn.Linear(D, num_hidden), nn.ReLU(),
+                                  nn.Linear(num_hidden, 2*num_hidden), nn.ReLU(),
+                                  nn.Linear(2*num_hidden, num_hidden), nn.ReLU(),
+                                  nn.Linear(num_hidden, D), nn.Tanh())
         transformations.append(MaskedCouplingLayer(scale_net, translation_net, mask))
 
     # Define flow model
