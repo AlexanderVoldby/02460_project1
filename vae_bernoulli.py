@@ -13,6 +13,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.decomposition import PCA
+from flow_prior import FlowPrior
 
 PI = torch.from_numpy(np.asarray(np.pi))
 
@@ -334,8 +335,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', type=str, default='train', choices=['train', 'sample', 'test', 'plot_test'], help='what to do when running the script (default: %(default)s)')
-    parser.add_argument('--model', type=str, default='models/Gaussian_prior.pt', choices=['models/Gaussian_prior.pt', 'models/MoG_prior.pt'], help='file to save model to or load model from (default: %(default)s)')
-    parser.add_argument('--prior', type=str, default='Gaussian', choices=['Gaussian', 'MoG'], help='prior distribution to use (default: %(default)s)')
+    parser.add_argument('--model', type=str, default='models/Gaussian_prior.pt', choices=['models/Gaussian_prior.pt', 'models/MoG_prior.pt', 'models/Flow_prior.pt'], help='file to save model to or load model from (default: %(default)s)')
+    parser.add_argument('--prior', type=str, default='Gaussian', choices=['Gaussian', 'MoG', 'Flow'], help='prior distribution to use (default: %(default)s)')
     parser.add_argument('--samples', type=str, default='samples.png', help='file to save samples in (default: %(default)s)')
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], help='torch device (default: %(default)s)')
     parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='batch size for training (default: %(default)s)')
@@ -360,16 +361,8 @@ if __name__ == "__main__":
 
     # Define prior distribution
     M = args.latent_dim
-    prior = None
-    final_layer = None
-    if args.prior == 'Gaussian':
-        prior = GaussianPrior(M)
-        final_layer = nn.Linear(512, M*2)
-    elif args.prior == 'MoG':
-        K = 5 # number of mixed guassians as prior
-        prior = MoGPrior(M, K=K)
-        final_layer = nn.Linear(512, M*2*K + K)
-
+    K = 5
+    final_layer = nn.Linear(512, 2*M*K + K) if args.prior == "MoG" else nn.Linear(512, 2*M)
     # Define encoder and decoder networks
     encoder_net = nn.Sequential(
         nn.Flatten(),
@@ -391,11 +384,19 @@ if __name__ == "__main__":
 
     # Define VAE model
     decoder = BernoulliDecoder(decoder_net)
-    encoder = None
+
     if args.prior == 'Gaussian':
+        prior = GaussianPrior(M)
         encoder = GaussianEncoder(encoder_net)
-    if args.prior == 'MoG':
-        encoder = MoGEncoder(encoder_net, M, K=K) 
+
+    elif args.prior == 'MoG':
+        prior = MoGPrior(M, K=K)
+        encoder = MoGEncoder(encoder_net, M, K=K)
+
+    elif args.prior == 'Flow':
+        prior = FlowPrior(M, num_transforms=4, hidden_dim=64)
+        encoder = GaussianEncoder(encoder_net)  
+
     model = VAE(prior, decoder, encoder).to(device)
 
     # Choose mode to run
