@@ -62,15 +62,51 @@ class MoGPrior(nn.Module):
         super(MoGPrior, self).__init__()
         self.M = M # dim of latent called L in book
         self.K = K
-        self.means = nn.Parameter(torch.rand(self.K, self.M), requires_grad=True)
+        self.means = nn.Parameter(torch.randn(self.K, self.M), requires_grad=True)
         self.logvars = nn.Parameter(torch.zeros(self.K, self.M), requires_grad=True)
-        self.weights = nn.Parameter(torch.rand(self.K), requires_grad=True)
+        self.weights = nn.Parameter((torch.ones(self.K)/ self.K), requires_grad=True)
 
     def forward(self):
         weights = F.softmax(self.weights, dim=-1)
+        means = torch.clamp(self.means, -4, 4)
+        stds = torch.clamp(torch.exp(self.logvars*0.5), -4, 4)
 
         return td.MixtureSameFamily(td.Categorical(probs=weights),
-                                td.Independent(td.Normal(loc=self.means, scale=torch.sqrt(torch.exp(self.logvars))), 1))
+                                td.Independent(td.Normal(loc=means, scale=stds), 1))
+
+class VampPrior(nn.Module):
+    def __init__(self, M, n_pseudo_p, encoder_net):
+        """
+        Define a VampPrior distribution.
+        Parameters:
+        M: [int] 
+           Dimension of the latent space.
+        K: [int]
+           Number of pseudo inputs.
+        encoder_net: [torch.nn.Module]
+              The encoder network that takes as a tensor of dim `B, D' and output a tensor 2M values for the mean and log variance.
+        """
+        super(VampPrior, self).__init__()
+        self.M = M
+        self.n_pseudo_points = n_pseudo_p
+        self.encoder_net = encoder_net
+        
+        # Make parameters
+        u = torch.randn(self.n_pseudo_points, 784)
+        self.u = nn.Parameter(u, requires_grad=True)
+
+        # Initialize the weights
+        self.weights = nn.Parameter((torch.ones(self.n_pseudo_points)/self.n_pseudo_points), requires_grad=True)
+
+    def get_params(self):
+        vamp_mean, vamp_log_var = torch.chunk(self.encoder_net(self.u), 2, dim=-1)
+        return vamp_mean, vamp_log_var
+
+    def forward(self):
+        vamp_mean, vamp_log_var = torch.chunk(self.encoder_net(self.u), 2, dim=-1)
+        w = F.softmax(self.weights+0.001, dim=-1)
+        return td.MixtureSameFamily(td.Categorical(probs=w), td.Independent(td.Normal(loc=vamp_mean, scale=torch.sqrt(torch.exp(vamp_log_var))), 1))
+ 
 
 class GaussianEncoder(nn.Module):
     def __init__(self, encoder_net):
@@ -120,9 +156,9 @@ class MoGEncoder(nn.Module):
            A tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
         """
         means, logvars, weights = torch.split(self.encoder_net(x), [self.M * self.K, self.M * self.K, self.K], dim=-1)
-        means = torch.clamp(means.view(-1, self.K, self.M), -10, 10)
-        logvars = torch.clamp(logvars.view(-1, self.K, self.M), -10, 10)
-        weights = F.softmax(weights, dim=-1)+0.001
+        means = torch.clamp(means.view(-1, self.K, self.M), -5, 5)
+        logvars = torch.clamp(logvars.view(-1, self.K, self.M), -5, 5)
+        weights = F.softmax(weights+0.001, dim=-1)
         return means, logvars, weights 
 
 class BernoulliDecoder(nn.Module):
@@ -156,7 +192,7 @@ class VAE(nn.Module):
     """
     Define a Variational Autoencoder (VAE) model.
     """
-    def __init__(self, prior, decoder, encoder):
+    def __init__(self, prior, decoder, encoder, prior_name):
         """
         Parameters:
         prior: [torch.nn.Module] 
@@ -171,8 +207,9 @@ class VAE(nn.Module):
         self.prior = prior
         self.decoder = decoder
         self.encoder = encoder
+        self.prior_name = prior_name
 
-    def elbo(self, x):
+    def elbo(self, x, beta=1.0):
         """
         Compute the ELBO for the given batch of data.
 
@@ -184,20 +221,24 @@ class VAE(nn.Module):
         """
         q = self.encoder(x) # q is a distribution, from the td.Independent class, where one can sample from the distribution.
         
-        if isinstance(self.prior(), td.MixtureSameFamily):
+        if self.prior_name == "MoG":
             # clamp the values of the logvars
             mu, log_var, w = q[0], q[1], q[2]
-            z = reparameterizeMoG(mu, torch.sqrt(torch.exp(log_var)), w)
+            z = reparameterizeMoG(mu, torch.exp(log_var*0.5), w)
             elbo_re = torch.mean(self.decoder(z).log_prob(x), dim=0)
             # Define mixture components
-            base_distribution = td.Independent(td.Normal(loc=mu, scale=torch.sqrt(torch.exp(log_var))), 1)
+            base_distribution = td.Independent(td.Normal(loc=mu, scale=torch.exp(log_var*0.5)), 1)
             mixture = td.Categorical(probs=w)
             # Define mixture model
             mog = td.MixtureSameFamily(mixture, base_distribution)
             ln_q_z_x = mog.log_prob(z)
             ln_p_z = self.prior().log_prob(z)
             elbo_kl = torch.mean(ln_q_z_x - ln_p_z, dim=0) 
-            elbo = elbo_re - elbo_kl
+            #kl_divergence = ln_q_z_x - ln_p_z 
+            #lambda_kl = 0.1  # Lower bound for KL
+            #elbo_kl = torch.mean(torch.max(kl_divergence, torch.tensor(lambda_kl)))
+            # use a warmup term of stability
+            elbo = elbo_re - beta* elbo_kl
         else:
             z = q.rsample()
             mu, std = q.mean, q.variance.sqrt()
@@ -220,7 +261,7 @@ class VAE(nn.Module):
         z = self.prior().sample(torch.Size([n_samples]))
         return self.decoder(z).sample()
     
-    def forward(self, x):
+    def forward(self, x, beta):
         """
         Compute the negative ELBO for the given batch of data.
 
@@ -228,7 +269,7 @@ class VAE(nn.Module):
         x: [torch.Tensor] 
            A tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
         """
-        return -self.elbo(x)
+        return -self.elbo(x, beta)
 
 def train(model, optimizer, data_loader, epochs, device):
     """
@@ -256,8 +297,15 @@ def train(model, optimizer, data_loader, epochs, device):
         for x in data_iter:
             x = x[0].to(device)
             optimizer.zero_grad()
-            loss = model(x)
-            loss.backward()
+            if isinstance(model.prior, MoGPrior):
+                beta = min(1.0, (epoch+0.1)/(epochs+0.1))
+                loss = model(x, beta)
+            else:
+                loss = model(x, 1.0)
+            if isinstance(model.prior, VampPrior):
+                loss.backward(retain_graph=True)
+            else:
+                loss.backward()
             optimizer.step()
 
             # Update progress bar
@@ -269,21 +317,21 @@ def test(model, data_loader, device):
     loss = 0
     for x in data_iter:
         x = x[0].to(device)
-        loss += model(x)
+        loss += model(x, 1.0)
     return loss/len(data_loader)
 
 def plot_approx_posterior(model, data_loader, device, M, data_points, figure_name):
     data_iter = iter(data_loader)
-    #label_list = [] not need to just make black dots
+    #label_list = []
     z_list = []
     with torch.no_grad():
-        for x, _ in data_iter:
         #for x, label in data_iter:
+        for x, _ in data_iter:
             x = x.to(device)
-            #label_list.append(label)
+    #        label_list.append(label)
             q = model.encoder(x)
             z = None
-            if isinstance(model.prior, GaussianPrior):
+            if isinstance(model.prior, (GaussianPrior, VampPrior)):
                 z = q.sample()
             elif isinstance(model.prior, MoGPrior):
                 z = reparameterizeMoG(q[0], torch.sqrt(torch.exp(q[1])), q[2]) 
@@ -335,8 +383,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', type=str, default='train', choices=['train', 'sample', 'test', 'plot_test'], help='what to do when running the script (default: %(default)s)')
-    parser.add_argument('--model', type=str, default='models/Gaussian_prior.pt', choices=['models/Gaussian_prior.pt', 'models/MoG_prior.pt', 'models/Flow_prior.pt'], help='file to save model to or load model from (default: %(default)s)')
-    parser.add_argument('--prior', type=str, default='Gaussian', choices=['Gaussian', 'MoG', 'Flow'], help='prior distribution to use (default: %(default)s)')
+    parser.add_argument('--model', type=str, default='models/Gaussian_prior.pt', choices=['models/Gaussian_prior.pt', 'models/MoG_prior.pt', 'models/Flow_prior.pt', 'models/Vamp_prior.pt'], help='file to save model to or load model from (default: %(default)s)')
+    parser.add_argument('--prior', type=str, default='Gaussian', choices=['Gaussian', 'MoG', 'Flow', 'Vamp'], help='prior distribution to use (default: %(default)s)')
     parser.add_argument('--samples', type=str, default='samples.png', help='file to save samples in (default: %(default)s)')
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], help='torch device (default: %(default)s)')
     parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='batch size for training (default: %(default)s)')
@@ -367,20 +415,21 @@ if __name__ == "__main__":
     encoder_net = nn.Sequential(
         nn.Flatten(),
         nn.Linear(784, 512),
-        nn.ReLU(),
+        nn.LeakyReLU(),
         nn.Linear(512, 512),
-        nn.ReLU(),
+        nn.LeakyReLU(),
         final_layer
     )
 
     decoder_net = nn.Sequential(
         nn.Linear(M, 512),
-        nn.ReLU(),
+        nn.LeakyReLU(),
         nn.Linear(512, 512),
-        nn.ReLU(),
+        nn.LeakyReLU(),
         nn.Linear(512, 784),
         nn.Unflatten(-1, (28, 28))
     )
+
 
     # Define VAE model
     decoder = BernoulliDecoder(decoder_net)
@@ -393,11 +442,16 @@ if __name__ == "__main__":
         prior = MoGPrior(M, K=K)
         encoder = MoGEncoder(encoder_net, M, K=K)
 
+    elif args.prior == 'Vamp':
+        n_pseudo_p = 16
+        prior = VampPrior(M, n_pseudo_p, encoder_net=encoder_net)
+        encoder = GaussianEncoder(encoder_net)
+    
     elif args.prior == 'Flow':
         prior = FlowPrior(M, num_transforms=4, hidden_dim=64)
         encoder = GaussianEncoder(encoder_net)  
 
-    model = VAE(prior, decoder, encoder).to(device)
+    model = VAE(prior, decoder, encoder, args.prior).to(device)
 
     # Choose mode to run
     if args.mode == 'train':
@@ -433,5 +487,5 @@ if __name__ == "__main__":
 
         # Plot test set in latent space
         #plot_approx_posterior(model, mnist_test_loader, args.device, M, len(mnist_test_loader)*mnist_test_loader.batch_size, args.prior) # The second last parameter is the number of data points to plot in the latent space
-        plot_approx_posterior(model, mnist_test_loader, args.device, M, 2500, args.prior) # 5000 points
+        plot_approx_posterior(model, mnist_test_loader, args.device, M, 2500, args.prior) # 2500 points
 
