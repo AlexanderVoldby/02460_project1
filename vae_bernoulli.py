@@ -15,8 +15,6 @@ import numpy as np
 from sklearn.decomposition import PCA
 from flow_prior import FlowPrior
 
-PI = torch.from_numpy(np.asarray(np.pi))
-
 class GaussianPrior(nn.Module):
     def __init__(self, M):
         """
