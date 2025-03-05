@@ -19,10 +19,17 @@ PI = torch.from_numpy(np.asarray(np.pi))
 
 def reparameterizeMoG(mu, stds, weights):
     batch_size, K, M = mu.shape
-    z = torch.zeros((batch_size, M))
-    for k in range(K):
-        eps = torch.randn((batch_size, M))
-        z += (mu[:, k, :] + stds[:, k, :] * eps) * weights[:, k, None]
+
+    component = td.Categorical(probs=weights).sample()  # Shape: (batch_size,)
+
+    # Gather the corresponding means and stds
+    mu_selected = torch.gather(mu, 1, component[:, None, None].expand(-1, 1, M)).squeeze(1)
+    stds_selected = torch.gather(stds, 1, component[:, None, None].expand(-1, 1, M)).squeeze(1)
+
+    # Reparameterization trick
+    eps = torch.randn((batch_size, M))
+    z = mu_selected + stds_selected * eps  # Shape: (batch_size, M)
+
     return z
 
 class GaussianPrior(nn.Module):
@@ -105,7 +112,7 @@ class VampPrior(nn.Module):
     def forward(self):
         vamp_mean, vamp_log_var = torch.chunk(self.encoder_net(self.u), 2, dim=-1)
         w = F.softmax(self.weights+0.001, dim=-1)
-        return td.MixtureSameFamily(td.Categorical(probs=w), td.Independent(td.Normal(loc=vamp_mean, scale=torch.sqrt(torch.exp(vamp_log_var))), 1))
+        return td.MixtureSameFamily(td.Categorical(probs=w), td.Independent(td.Normal(loc=vamp_mean, scale=torch.exp(vamp_log_var*0.5)), 1))
  
 
 class GaussianEncoder(nn.Module):
@@ -234,9 +241,6 @@ class VAE(nn.Module):
             ln_q_z_x = mog.log_prob(z)
             ln_p_z = self.prior().log_prob(z)
             elbo_kl = torch.mean(ln_q_z_x - ln_p_z, dim=0) 
-            #kl_divergence = ln_q_z_x - ln_p_z 
-            #lambda_kl = 0.1  # Lower bound for KL
-            #elbo_kl = torch.mean(torch.max(kl_divergence, torch.tensor(lambda_kl)))
             # use a warmup term of stability
             elbo = elbo_re - beta* elbo_kl
         else:
@@ -443,7 +447,7 @@ if __name__ == "__main__":
         encoder = MoGEncoder(encoder_net, M, K=K)
 
     elif args.prior == 'Vamp':
-        n_pseudo_p = 16
+        n_pseudo_p = 5
         prior = VampPrior(M, n_pseudo_p, encoder_net=encoder_net)
         encoder = GaussianEncoder(encoder_net)
     
@@ -486,6 +490,5 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.model, map_location=torch.device(args.device)))
 
         # Plot test set in latent space
-        #plot_approx_posterior(model, mnist_test_loader, args.device, M, len(mnist_test_loader)*mnist_test_loader.batch_size, args.prior) # The second last parameter is the number of data points to plot in the latent space
         plot_approx_posterior(model, mnist_test_loader, args.device, M, 2500, args.prior) # 2500 points
 
