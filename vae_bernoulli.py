@@ -17,14 +17,6 @@ from flow_prior import FlowPrior
 
 PI = torch.from_numpy(np.asarray(np.pi))
 
-def reparameterizeMoG(mu, stds, weights):
-    batch_size, K, M = mu.shape
-    z = torch.zeros((batch_size, M))
-    for k in range(K):
-        eps = torch.randn((batch_size, M))
-        z += (mu[:, k, :] + stds[:, k, :] * eps) * weights[:, k, None]
-    return z
-
 class GaussianPrior(nn.Module):
     def __init__(self, M):
         """
@@ -161,6 +153,28 @@ class MoGEncoder(nn.Module):
         weights = F.softmax(weights+0.001, dim=-1)
         return means, logvars, weights 
 
+    def rsample(self, mu, std, weights):
+        """
+        Sample the mixture of gaussian using reparametrization
+        """
+        batch_size, K, M = mu.shape
+        # Sample mixture component indices
+        cat = td.Categorical(weights)             # cat ~ shape [batch_size]
+        k = cat.sample()                          # shape (batch_size,)
+
+
+        # Gather the means/stds for the chosen components
+        k_expanded = k.unsqueeze(1)          # shape (32,1)
+        k_expanded = k_expanded.unsqueeze(2)  # shape (32,1,1)
+        k_expanded = k_expanded.expand(-1, -1, mu.size(2)) # shape (32,1,32)
+        chosen_mu  = torch.gather(mu, 1, k_expanded).squeeze(1)   # (batch_size, M)
+        chosen_std = torch.gather(std, 1, k_expanded).squeeze(1)  # (batch_size, M)
+
+        # Sample eps ~ N(0,I) and form z = mu + std * eps
+        eps = torch.randn_like(chosen_mu)
+        z   = chosen_mu + chosen_std * eps
+        return z
+
 class BernoulliDecoder(nn.Module):
     def __init__(self, decoder_net):
         """
@@ -224,7 +238,8 @@ class VAE(nn.Module):
         if self.prior_name == "MoG":
             # clamp the values of the logvars
             mu, log_var, w = q[0], q[1], q[2]
-            z = reparameterizeMoG(mu, torch.exp(log_var*0.5), w)
+            # Sample with reparametrization trick
+            z = self.encoder.rsample(mu, torch.exp(log_var*0.5), w)
             elbo_re = torch.mean(self.decoder(z).log_prob(x), dim=0)
             # Define mixture components
             base_distribution = td.Independent(td.Normal(loc=mu, scale=torch.exp(log_var*0.5)), 1)
@@ -334,7 +349,7 @@ def plot_approx_posterior(model, data_loader, device, M, data_points, figure_nam
             if isinstance(model.prior, (GaussianPrior, VampPrior)):
                 z = q.sample()
             elif isinstance(model.prior, MoGPrior):
-                z = reparameterizeMoG(q[0], torch.sqrt(torch.exp(q[1])), q[2]) 
+                z = model.encoder.rsample(q[0], torch.exp(q[1]*0.5), q[2])
             z_list.append(z)
         z = torch.cat(z_list, dim=0).numpy()
         #labels = torch.cat(label_list, dim=0).numpy()
